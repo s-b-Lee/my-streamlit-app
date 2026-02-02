@@ -1,18 +1,18 @@
 import streamlit as st
 import requests
 from typing import Dict, Any, List, Optional, Tuple
+from openai import OpenAI
 
 # =========================
 # Page Config
 # =========================
-st.set_page_config(page_title="나와 어울리는 영화는?", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="🎬 상황 맞춤 영화 추천", page_icon="🎬", layout="wide")
 
-# =========================
-# Constants
-# =========================
 TMDB_BASE = "https://api.themoviedb.org/3"
 POSTER_BASE = "https://image.tmdb.org/t/p/w500"
+TMDB_MOVIE_WEB = "https://www.themoviedb.org/movie/"
 
+# 장르 ID (요청에서 주어진 것)
 GENRE_IDS = {
     "액션": 28,
     "코미디": 35,
@@ -23,137 +23,75 @@ GENRE_IDS = {
 }
 
 # =========================
+# Session State
+# =========================
+if "excluded_ids" not in st.session_state:
+    st.session_state.excluded_ids = set()  # 사용자가 "이미 봤어요"로 제외한 영화 ID
+
+if "last_reco" not in st.session_state:
+    st.session_state.last_reco = None  # {"movie_id":..., "title":..., "reason":...}
+
+if "candidates" not in st.session_state:
+    st.session_state.candidates = []  # 현재 화면에 보여줄 후보 리스트
+
+# =========================
 # Sidebar
 # =========================
 with st.sidebar:
-    st.header("🔑 TMDB 설정")
+    st.header("🔑 API 설정")
 
     tmdb_key = st.text_input("TMDB API Key", type="password", placeholder="TMDB API Key 입력")
+    openai_key = st.text_input("OpenAI API Key", type="password", placeholder="sk-...")
 
-    st.subheader("⚙️ 추천 필터 (고도화)")
+    st.subheader("⚙️ 추천 설정")
     language = st.selectbox("언어", ["ko-KR", "en-US"], index=0)
     region = st.selectbox("지역(국가 코드)", ["KR", "US", "JP", "GB", "FR", "DE"], index=0)
-    min_vote_count = st.slider("최소 투표 수(vote_count.gte)", 0, 5000, 300, step=50)
-    min_rating = st.slider("최소 평점(vote_average.gte)", 0.0, 9.5, 6.5, step=0.1)
-    max_items = st.selectbox("가져올 영화 수", [6, 9, 12], index=1)
-    include_providers = st.checkbox("한국 시청 제공처(JustWatch) 표시", value=True)
-    include_trailer = st.checkbox("트레일러(YouTube) 표시", value=True)
-    include_cast = st.checkbox("주요 출연진 표시", value=True)
+    max_items = st.selectbox("후보 영화 개수(화면 표시)", [6, 9, 12], index=1)
+    min_vote_count = st.slider("최소 투표 수", 0, 5000, 200, step=50)
+    min_rating = st.slider("최소 평점", 0.0, 9.5, 6.0, step=0.1)
+
+    st.divider()
+    if st.button("🧹 제외 목록/결과 초기화"):
+        st.session_state.excluded_ids = set()
+        st.session_state.last_reco = None
+        st.session_state.candidates = []
+        st.rerun()
 
     st.caption("🔒 키는 세션에서만 사용됩니다. (저장 X)")
 
 # =========================
 # UI
 # =========================
-st.title("🎬 나와 어울리는 영화는?")
-st.write("5개의 질문으로 당신의 영화 취향을 분석하고, TMDB에서 **인기 영화**를 추천해드려요 🍿✨")
+st.title("🎬 지금 상황에 딱 맞는 영화 추천")
+st.write(
+    "질문 대신, **지금 내 상황/기분**을 적으면 TMDB에서 후보를 가져오고, "
+    "**LLM이 그중 딱 1편**을 최종 추천해줘요 🍿✨"
+)
 st.divider()
 
-# =========================
-# Questions (5)
-# 옵션 인덱스: 0=로맨스/드라마, 1=액션/어드벤처, 2=SF/판타지, 3=코미디
-# =========================
-q1_opts = [
-    "💌 조용한 카페에서 여운 있는 영화 한 편",
-    "💥 친구들이랑 스트레스 풀 겸 통쾌한 액션 영화",
-    "🚀 현실 잊게 만드는 다른 세계관 영화 몰아보기",
-    "😂 아무 생각 없이 웃긴 영화 보면서 쉬기",
-]
-q2_opts = [
-    "🌸 사람들 사이의 감정과 관계가 중심이 되는 삶",
-    "🏃 위험하지만 매 순간이 긴박한 모험의 연속",
-    "🪐 현실엔 없는 능력이나 세계가 존재하는 삶",
-    "🤡 크게 심각하지 않고, 웃지 못할 상황도 웃어넘기는 삶",
-]
-q3_opts = [
-    "🤍 “너랑 얘기하면 생각이 많아져”",
-    "🔥 “너 진짜 추진력 하나는 인정”",
-    "🧠 “너 생각하는 거 좀 독특하다?”",
-    "😆 “너 있으면 분위기 살잖아”",
-]
-q4_opts = [
-    "🎭 배우의 연기력과 감정선",
-    "🎬 몰입감 있는 전개와 스케일",
-    "🌌 세계관 설정과 상상력",
-    "🎉 얼마나 많이 웃게 해주느냐",
-]
-q5_opts = [
-    "🌧️ 조용히 혼자 걷는 감정적인 장면",
-    "⚡ 바쁘게 움직이며 사건을 해결하는 장면",
-    "🌀 현실과 다른 공간을 떠도는 장면",
-    "🎈 실수 연발이지만 웃음이 터지는 장면",
-]
+situation = st.text_area(
+    "📝 지금 어떤 상황/기분인가요?",
+    placeholder="예: 과제 때문에 머리가 터질 것 같고 지쳐요. 아무 생각 없이 웃고 싶어요.\n예: 연애 감성 터지는 날… 여운 남는 영화 보고 싶어.",
+    height=120,
+)
 
-q1 = st.radio("1️⃣ 시험 끝난 날, 가장 하고 싶은 건?", q1_opts)
-q2 = st.radio("2️⃣ 영화 주인공으로 살아야 한다면, 어떤 인생이 좋아?", q2_opts)
-q3 = st.radio("3️⃣ 친구들이 너한테 자주 하는 말은?", q3_opts)
-q4 = st.radio("4️⃣ 영화 볼 때 가장 중요한 요소는?", q4_opts)
-q5 = st.radio("5️⃣ 요즘 네 상태를 영화 장면으로 표현한다면?", q5_opts)
+colA, colB = st.columns([2, 1])
+with colA:
+    st.caption("팁) 키워드가 구체적일수록 좋아요: '힐링', '통쾌', '현실도피', '감성', '웃고 싶다', '긴장감' 등")
+with colB:
+    fallback_mood = st.selectbox(
+        "무드 직접 선택(선택사항)",
+        ["자동 분류", "힐링/잔잔", "감성/여운", "통쾌/에너지", "현실도피/판타지", "웃음/가벼움", "긴장/스릴"],
+        index=0,
+    )
 
 st.divider()
 
 # =========================
-# Helpers: quiz -> genre
-# =========================
-def option_index(answer: str, options: List[str]) -> int:
-    return options.index(answer)
-
-def bucket_counts(a1, a2, a3, a4, a5) -> List[int]:
-    picks = [
-        option_index(a1, q1_opts),
-        option_index(a2, q2_opts),
-        option_index(a3, q3_opts),
-        option_index(a4, q4_opts),
-        option_index(a5, q5_opts),
-    ]
-    counts = [0, 0, 0, 0]
-    for p in picks:
-        counts[p] += 1
-    return counts
-
-def decide_genre_bucket(a1, a2, a3, a4, a5) -> int:
-    counts = bucket_counts(a1, a2, a3, a4, a5)
-    # 동점이면 앞쪽 우선(로맨스/드라마 -> 액션 -> SF/판타지 -> 코미디)
-    return max(range(4), key=lambda i: counts[i])
-
-def refine_subgenre(bucket: int, a2: str, a5: str) -> Tuple[str, List[int], str]:
-    """
-    returns:
-      - display_genre_name
-      - genre_ids (one or multiple)
-      - why (짧은 추천 이유 텍스트)
-    """
-    if bucket == 0:
-        romance_signals = 0
-        if a2 == q2_opts[0]:
-            romance_signals += 2
-        if a5 == q5_opts[0]:
-            romance_signals += 1
-        if romance_signals >= 2:
-            return "로맨스/드라마", [GENRE_IDS["로맨스"], GENRE_IDS["드라마"]], "감정선과 관계의 여운을 중요하게 보는 선택이 많았어요."
-        return "드라마", [GENRE_IDS["드라마"]], "현실적인 감정과 몰입감 있는 서사를 선호하는 선택이 많았어요."
-
-    if bucket == 1:
-        return "액션", [GENRE_IDS["액션"]], "속도감과 긴장감, 통쾌한 전개를 선호하는 선택이 많았어요."
-
-    if bucket == 2:
-        sf_signals = 0
-        if a5 == q5_opts[2]:
-            sf_signals += 2
-        if a2 == q2_opts[2]:
-            sf_signals += 1
-        if sf_signals >= 2:
-            return "SF", [GENRE_IDS["SF"]], "세계관/비현실 설정을 즐기는 선택이 많았어요."
-        return "판타지", [GENRE_IDS["판타지"]], "상상력과 환상적인 분위기를 선호하는 선택이 많았어요."
-
-    return "코미디", [GENRE_IDS["코미디"]], "가볍게 웃고 기분 전환하는 요소를 선호하는 선택이 많았어요."
-
-# =========================
-# Helpers: TMDB API (with caching)
+# TMDB Helpers (cached)
 # =========================
 def tmdb_get(api_key: str, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if params is None:
-        params = {}
+    params = params or {}
     params = dict(params)
     params["api_key"] = api_key
     url = f"{TMDB_BASE}{path}"
@@ -161,14 +99,21 @@ def tmdb_get(api_key: str, path: str, params: Optional[Dict[str, Any]] = None) -
     r.raise_for_status()
     return r.json()
 
-@st.cache_data(ttl=60 * 30)  # 30분 캐시: 같은 조건 재요청 줄이기(레이트리밋/속도 개선)
-def discover_movies_cached(api_key: str, genre_ids_csv: str, language: str, region: str,
-                          min_vote_count: int, min_rating: float, page: int) -> Dict[str, Any]:
+@st.cache_data(ttl=60 * 30)
+def discover_movies_cached(
+    api_key: str,
+    with_genres: str,
+    language: str,
+    region: str,
+    min_vote_count: int,
+    min_rating: float,
+    page: int,
+) -> Dict[str, Any]:
     return tmdb_get(
         api_key,
         "/discover/movie",
         params={
-            "with_genres": genre_ids_csv,
+            "with_genres": with_genres,
             "language": language,
             "region": region,
             "sort_by": "popularity.desc",
@@ -179,220 +124,340 @@ def discover_movies_cached(api_key: str, genre_ids_csv: str, language: str, regi
         },
     )
 
-@st.cache_data(ttl=60 * 60)  # 1시간 캐시: 상세정보는 더 오래 캐시
-def movie_details_cached(api_key: str, movie_id: int, language: str, append: str) -> Dict[str, Any]:
-    # append_to_response로 videos/credits 등을 한 번에 가져오기(요청 수 감소)  :contentReference[oaicite:3]{index=3}
-    return tmdb_get(
-        api_key,
-        f"/movie/{movie_id}",
-        params={
-            "language": language,
-            "append_to_response": append,
-        },
-    )
+@st.cache_data(ttl=60 * 60)
+def movie_videos_cached(api_key: str, movie_id: int, language: str) -> Dict[str, Any]:
+    return tmdb_get(api_key, f"/movie/{movie_id}/videos", params={"language": language})
 
 @st.cache_data(ttl=60 * 60)
-def movie_watch_providers_cached(api_key: str, movie_id: int) -> Dict[str, Any]:
-    # 시청 제공처: JustWatch 파트너십 기반(표기 필요) :contentReference[oaicite:4]{index=4}
-    return tmdb_get(api_key, f"/movie/{movie_id}/watch/providers", params={})
+def movie_details_cached(api_key: str, movie_id: int, language: str) -> Dict[str, Any]:
+    return tmdb_get(api_key, f"/movie/{movie_id}", params={"language": language})
+
+def pick_trailer_youtube(videos_obj: Dict[str, Any]) -> Optional[str]:
+    results = (videos_obj or {}).get("results") or []
+    for v in results:
+        if v.get("site") == "YouTube" and v.get("type") == "Trailer" and v.get("key"):
+            return f"https://www.youtube.com/watch?v={v['key']}"
+    for v in results:
+        if v.get("site") == "YouTube" and v.get("key"):
+            return f"https://www.youtube.com/watch?v={v['key']}"
+    return None
+
+def poster_clickable_html(poster_url: str, link_url: str, title: str) -> str:
+    return f"""
+    <a href="{link_url}" target="_blank" style="text-decoration:none;">
+        <img src="{poster_url}" alt="{title}" style="width:100%; border-radius:14px;" />
+    </a>
+    """
+
+def short_text(text: str, limit: int = 260) -> str:
+    text = (text or "").strip()
+    if not text:
+        return "줄거리 정보가 없습니다."
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 def safe_poster_url(poster_path: Optional[str]) -> Optional[str]:
     if not poster_path:
         return None
     return f"{POSTER_BASE}{poster_path}"
 
-def short_text(text: str, limit: int = 260) -> str:
-    text = (text or "").strip()
-    if not text:
-        return "줄거리 정보가 없습니다."
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "…"
+# =========================
+# Mood Classifier (rule-based)
+# =========================
+def classify_mood(text: str, fallback: str) -> Tuple[str, List[int], str]:
+    if fallback != "자동 분류":
+        mapping = {
+            "힐링/잔잔": ("힐링/잔잔", [GENRE_IDS["드라마"]], "지금은 마음을 안정시키는 ‘잔잔한 흐름’이 우선이라 봤어요."),
+            "감성/여운": ("감성/여운", [GENRE_IDS["로맨스"], GENRE_IDS["드라마"]], "감정선과 여운이 필요한 상황이라 봤어요."),
+            "통쾌/에너지": ("통쾌/에너지", [GENRE_IDS["액션"]], "답답함을 뚫는 속도감/해결감이 필요한 상황이라 봤어요."),
+            "현실도피/판타지": ("현실도피/판타지", [GENRE_IDS["SF"], GENRE_IDS["판타지"]], "현실을 잠시 잊게 해줄 세계관이 필요한 상황이라 봤어요."),
+            "웃음/가벼움": ("웃음/가벼움", [GENRE_IDS["코미디"]], "가볍게 웃고 기분을 리셋하는 게 우선이라 봤어요."),
+            "긴장/스릴": ("긴장/스릴", [GENRE_IDS["액션"], GENRE_IDS["SF"]], "집중해서 몰입할 ‘긴장감’이 필요한 상황이라 봤어요."),
+        }
+        return mapping[fallback]
 
-def pick_trailer_youtube(videos_obj: Dict[str, Any]) -> Optional[str]:
-    # videos.results 중 type=Trailer, site=YouTube 우선
-    results = (videos_obj or {}).get("results") or []
-    best = None
-    for v in results:
-        if v.get("site") == "YouTube" and v.get("type") == "Trailer":
-            best = v
-            break
-    if not best:
-        for v in results:
-            if v.get("site") == "YouTube":
-                best = v
-                break
-    if best and best.get("key"):
-        return f"https://www.youtube.com/watch?v={best['key']}"
-    return None
+    t = (text or "").lower()
+    score = {k: 0 for k in ["힐링/잔잔", "감성/여운", "통쾌/에너지", "현실도피/판타지", "웃음/가벼움", "긴장/스릴"]}
 
-def top_cast_names(credits_obj: Dict[str, Any], n: int = 5) -> List[str]:
-    cast = (credits_obj or {}).get("cast") or []
-    names = []
-    for c in cast[:n]:
-        name = c.get("name")
-        if name:
-            names.append(name)
-    return names
+    def has_any(words: List[str]) -> bool:
+        return any(w in t for w in words)
 
-def providers_in_region(providers_obj: Dict[str, Any], region: str) -> List[str]:
-    results = (providers_obj or {}).get("results") or {}
-    by_region = results.get(region) or {}
-    names = []
-    # 우선순위: flatrate(스트리밍) -> rent -> buy
-    for key in ["flatrate", "rent", "buy"]:
-        for p in (by_region.get(key) or []):
-            nm = p.get("provider_name")
-            if nm and nm not in names:
-                names.append(nm)
-    return names
+    if has_any(["힐링", "잔잔", "편안", "쉬고", "지쳤", "위로", "따뜻", "포근", "안정", "휴식"]):
+        score["힐링/잔잔"] += 3
+    if has_any(["감성", "여운", "눈물", "울고", "연애", "사랑", "이별", "설렘", "로맨스"]):
+        score["감성/여운"] += 3
+    if has_any(["통쾌", "사이다", "스트레스", "답답", "화나", "빡치", "에너지", "액션", "카타르시스"]):
+        score["통쾌/에너지"] += 3
+    if has_any(["현실도피", "판타지", "마법", "우주", "외계", "미래", "세계관", "sf", "모험"]):
+        score["현실도피/판타지"] += 3
+    if has_any(["웃고", "웃긴", "코미디", "빵터", "가볍", "기분전환", "유머"]):
+        score["웃음/가벼움"] += 3
+    if has_any(["긴장", "몰입", "스릴", "서스펜스", "추격", "전투", "위기", "손에땀"]):
+        score["긴장/스릴"] += 3
+
+    mood = max(score, key=lambda k: score[k]) if max(score.values()) > 0 else "힐링/잔잔"
+
+    mapping = {
+        "힐링/잔잔": ("힐링/잔잔", [GENRE_IDS["드라마"]], "피로를 낮추고 마음을 정돈하는 흐름이 우선으로 보여서, 잔잔한 드라마 중심으로 골랐어요."),
+        "감성/여운": ("감성/여운", [GENRE_IDS["로맨스"], GENRE_IDS["드라마"]], "감정의 결이 중요한 상황으로 보여서, 여운이 남는 로맨스/드라마를 우선 추천해요."),
+        "통쾌/에너지": ("통쾌/에너지", [GENRE_IDS["액션"]], "답답함을 해소할 ‘해결감’이 필요해 보여서, 속도감 있는 액션을 우선 추천해요."),
+        "현실도피/판타지": ("현실도피/판타지", [GENRE_IDS["SF"], GENRE_IDS["판타지"]], "현실에서 잠깐 벗어나고 싶어 보여서, SF/판타지 중심으로 추천해요."),
+        "웃음/가벼움": ("웃음/가벼움", [GENRE_IDS["코미디"]], "가볍게 웃으며 리셋하는 게 최우선으로 보여서, 코미디를 우선 추천해요."),
+        "긴장/스릴": ("긴장/스릴", [GENRE_IDS["액션"], GENRE_IDS["SF"]], "집중해서 몰입할 자극이 필요해 보여서, 긴장감 높은 액션/SF로 추천해요."),
+    }
+    return mapping[mood]
 
 # =========================
-# Result Button
+# Candidate Fetch (excluding watched)
 # =========================
-if st.button("✨ 결과 보기"):
+def fetch_candidates(
+    api_key: str,
+    genre_ids: List[int],
+    language: str,
+    region: str,
+    min_vote_count: int,
+    min_rating: float,
+    need: int,
+    excluded_ids: set,
+) -> List[Dict[str, Any]]:
+    genre_csv = ",".join(str(x) for x in genre_ids)
+    movies: List[Dict[str, Any]] = []
+    seen = set()
+
+    # 여러 페이지를 탐색해 excluded를 피해 충분히 채움
+    for page in [1, 2, 3, 4, 5]:
+        data = discover_movies_cached(api_key, genre_csv, language, region, min_vote_count, min_rating, page)
+        for m in (data.get("results") or []):
+            mid = m.get("id")
+            if not mid or mid in excluded_ids or mid in seen:
+                continue
+            seen.add(mid)
+            movies.append(m)
+            if len(movies) >= need:
+                return movies
+    return movies
+
+# =========================
+# OpenAI: pick ONE final movie
+# =========================
+def llm_pick_one_movie(
+    openai_api_key: str,
+    situation_text: str,
+    mood_label: str,
+    candidates: List[Dict[str, Any]],
+    language: str,
+) -> Dict[str, Any]:
+    """
+    Returns:
+      {"movie_id": int, "title": str, "reason": str}
+    """
+    client = OpenAI(api_key=openai_api_key)
+
+    # 후보를 LLM 입력용으로 축약
+    packed = []
+    for m in candidates:
+        packed.append(
+            {
+                "id": m.get("id"),
+                "title": m.get("title") or m.get("name"),
+                "vote_average": m.get("vote_average"),
+                "vote_count": m.get("vote_count"),
+                "release_date": m.get("release_date"),
+                "overview": (m.get("overview") or "")[:500],
+            }
+        )
+
+    system = (
+        "당신은 영화 추천 전문가입니다. 사용자의 '상황/기분'과 '무드'에 가장 잘 맞는 영화 한 편만 고릅니다.\n"
+        "- 과장/허위 없이, 후보 목록 안에서만 선택하세요.\n"
+        "- 추천 사유는 2~4문장으로 짧고 명확하게.\n"
+        "- 출력은 반드시 JSON만: {\"movie_id\":..., \"title\":..., \"reason\":...}\n"
+    )
+
+    user = {
+        "situation": situation_text,
+        "mood": mood_label,
+        "candidates": packed,
+        "language": language,
+        "selection_criteria": [
+            "상황과 무드에의 적합도(가장 중요)",
+            "접근성(너무 무겁거나 극단적으로 난해한 작품은 피함)",
+            "대중성(평점/인기도 참고, 단 맹신하지 않음)",
+        ],
+    }
+
+    resp = client.responses.create(
+        model="gpt-5-mini",
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"{user}"},
+        ],
+    )
+
+    # Responses API: output_text에 모델의 텍스트 출력이 들어옴
+    text = resp.output_text.strip()
+
+    # 아주 단순 파서(안전하게 실패 처리)
+    import json
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError("not dict")
+        return {
+            "movie_id": int(data["movie_id"]),
+            "title": str(data["title"]),
+            "reason": str(data["reason"]),
+        }
+    except Exception:
+        # 파싱 실패 시: 첫 후보로 fallback
+        first = packed[0]
+        return {
+            "movie_id": int(first["id"]),
+            "title": str(first["title"]),
+            "reason": "후보 중 상황과 무드에 가장 무난하게 맞는 작품으로 우선 추천합니다.",
+        }
+
+# =========================
+# Buttons
+# =========================
+left_btn, right_btn = st.columns([1, 1])
+with left_btn:
+    run_btn = st.button("✨ 후보 가져오기", use_container_width=True)
+with right_btn:
+    reroll_btn = st.button("🔁 (봤던 것 제외) 다시 뽑기", use_container_width=True)
+
+if run_btn or reroll_btn:
     if not tmdb_key.strip():
         st.error("사이드바에 TMDB API Key를 입력해 주세요.")
         st.stop()
 
-    bucket = decide_genre_bucket(q1, q2, q3, q4, q5)
-    genre_label, genre_ids, why_genre = refine_subgenre(bucket, q2, q5)
-    counts = bucket_counts(q1, q2, q3, q4, q5)
-
-    # 여러 페이지를 섞어 다양성(중복 감소) 확보
-    genre_ids_csv = ",".join(map(str, genre_ids))
-    target_n = int(max_items)
-
-    with st.spinner("🎬 TMDB에서 당신 취향에 맞는 영화를 찾는 중..."):
-        movies: List[Dict[str, Any]] = []
-        seen_ids = set()
-        # 페이지 1~3까지 훑어보고 조건에 맞는 것만 수집
-        for page in [1, 2, 3]:
-            data = discover_movies_cached(
-                tmdb_key, genre_ids_csv, language, region, int(min_vote_count), float(min_rating), page
-            )
-            for m in (data.get("results") or []):
-                mid = m.get("id")
-                if not mid or mid in seen_ids:
-                    continue
-                seen_ids.add(mid)
-                # 포스터 없는 건 뒤로 빼고 싶으면 여기서 스킵 가능
-                movies.append(m)
-                if len(movies) >= target_n:
-                    break
-            if len(movies) >= target_n:
-                break
-
-    if not movies:
-        st.warning("조건에 맞는 영화를 찾지 못했어요. 필터(평점/투표수)를 낮추거나 다른 선택으로 다시 시도해 주세요.")
+    if not situation.strip() and fallback_mood == "자동 분류":
+        st.warning("상황을 한 줄이라도 적어주세요! (또는 무드를 직접 선택해도 돼요)")
         st.stop()
 
+    mood_label, genre_ids, mood_reason = classify_mood(situation, fallback_mood)
+
+    with st.spinner("🎬 TMDB에서 후보 영화를 가져오는 중..."):
+        st.session_state.candidates = fetch_candidates(
+            api_key=tmdb_key,
+            genre_ids=genre_ids,
+            language=language,
+            region=region,
+            min_vote_count=int(min_vote_count),
+            min_rating=float(min_rating),
+            need=int(max_items),
+            excluded_ids=st.session_state.excluded_ids,
+        )
+        st.session_state.last_reco = None  # 후보 새로 뽑으면 최종 추천은 리셋
+
+# =========================
+# Render Candidates + Watched Exclusion
+# =========================
+if st.session_state.candidates:
+    mood_label, genre_ids, mood_reason = classify_mood(situation, fallback_mood)
+
     st.divider()
-    st.markdown(f"## 🎯 당신에게 딱인 장르는: **{genre_label}**!")
-    st.caption(
-        f"선택 분포: 로맨스/드라마 {counts[0]} · 액션/어드벤처 {counts[1]} · SF/판타지 {counts[2]} · 코미디 {counts[3]}"
-    )
-    st.write(f"**왜 이 장르?** {why_genre}")
+    st.markdown(f"## 🎯 지금 당신에게 딱인 분위기: **{mood_label}**")
+    st.write(f"**추천 근거:** {mood_reason}")
+    st.caption(f"이미 본 영화는 카드에서 체크하면 다음 추천에서 자동 제외됩니다. ✅")
     st.divider()
 
-    # =========================
-    # 3-column Cards
-    # =========================
+    # 최종 1편 추천(LLM)
+    final_btn = st.button("🤖 후보 중 '딱 1편' 최종 추천 받기", use_container_width=True)
+    if final_btn:
+        if not openai_key.strip():
+            st.error("사이드바에 OpenAI API Key를 입력해 주세요.")
+            st.stop()
+
+        with st.spinner("🤖 당신에게 가장 맞는 1편을 고르는 중..."):
+            st.session_state.last_reco = llm_pick_one_movie(
+                openai_api_key=openai_key,
+                situation_text=situation.strip(),
+                mood_label=mood_label,
+                candidates=st.session_state.candidates,
+                language=language,
+            )
+
+    # 최종 추천 표시
+    if st.session_state.last_reco:
+        reco = st.session_state.last_reco
+        st.success(f"✅ 최종 추천: **{reco['title']}**")
+        st.write(reco["reason"])
+        st.divider()
+
+    # 3열 카드
     cols = st.columns(3)
-    for i, m in enumerate(movies):
+
+    for i, m in enumerate(st.session_state.candidates):
         col = cols[i % 3]
 
         movie_id = m.get("id")
         title = m.get("title") or "제목 없음"
         rating = m.get("vote_average")
-        overview = m.get("overview")
+        overview = m.get("overview") or ""
         poster_url = safe_poster_url(m.get("poster_path"))
-        release_date = m.get("release_date")
+
+        # 예고편 링크 준비(캐시됨)
+        trailer_url = None
+        if movie_id:
+            try:
+                vids = movie_videos_cached(tmdb_key, int(movie_id), language)
+                trailer_url = pick_trailer_youtube(vids)
+            except Exception:
+                trailer_url = None
+
+        # 포스터 클릭 시: 예고편 있으면 예고편, 없으면 TMDB 페이지
+        link_url = trailer_url or (f"{TMDB_MOVIE_WEB}{movie_id}" if movie_id else None)
 
         with col:
             with st.container(border=True):
-                if poster_url:
+                # 포스터(클릭 -> 예고편)
+                if poster_url and link_url:
+                    st.markdown(poster_clickable_html(poster_url, link_url, title), unsafe_allow_html=True)
+                    st.caption("🖱️ 포스터 클릭 → 예고편(또는 TMDB 페이지)")
+                elif poster_url:
                     st.image(poster_url, use_container_width=True)
                 else:
                     st.info("포스터 없음")
 
+                # 기본 정보
                 st.markdown(f"### {title}")
                 if rating is not None:
                     st.write(f"⭐ 평점: **{float(rating):.1f} / 10**")
                 else:
                     st.write("⭐ 평점: 정보 없음")
 
-                if release_date:
-                    st.caption(f"개봉일: {release_date}")
+                # 이미 본 영화 제외 체크
+                watched_key = f"watched_{movie_id}"
+                default_checked = movie_id in st.session_state.excluded_ids
+                watched = st.checkbox("✅ 이미 봤어요 (다음 추천에서 제외)", value=default_checked, key=watched_key)
+                if watched and movie_id:
+                    st.session_state.excluded_ids.add(movie_id)
+                if (not watched) and movie_id and (movie_id in st.session_state.excluded_ids):
+                    st.session_state.excluded_ids.remove(movie_id)
 
-                # “카드 클릭” 느낌은 Streamlit에서 실제 클릭 이벤트가 제한적이라,
-                # expander를 카드 내부에 배치해 동일 UX로 제공
-                with st.expander("📖 상세 정보 보기", expanded=False):
-                    st.write(short_text(overview, 420))
+                # 상세
+                with st.expander("📖 상세 정보 / 예고편", expanded=False):
+                    st.write(short_text(overview, 450))
 
-                    if not movie_id:
-                        st.warning("상세 정보를 불러올 수 없습니다.")
-                        continue
+                    # 앱 내 예고편 재생(추가 UX)
+                    if trailer_url:
+                        st.video(trailer_url)
+                    elif movie_id:
+                        st.link_button("🔗 TMDB에서 보기", f"{TMDB_MOVIE_WEB}{movie_id}")
 
-                    # 상세정보 고도화: append_to_response로 videos/credits를 한 번에
-                    append_parts = []
-                    if include_trailer:
-                        append_parts.append("videos")
-                    if include_cast:
-                        append_parts.append("credits")
-                    # (watch/providers는 별도 엔드포인트라 append 대상 아님)
-                    append = ",".join(append_parts) if append_parts else ""
+                    # 간단 추천 이유(상황 기반)
+                    if mood_label in ["힐링/잔잔", "감성/여운"]:
+                        reason = "지금은 마음의 속도를 낮추는 영화가 잘 맞아서, 감정선/여운이 좋은 작품이 어울려요."
+                    elif mood_label in ["통쾌/에너지", "긴장/스릴"]:
+                        reason = "지금은 텐션과 몰입감이 필요해 보여서, 전개가 빠르고 에너지 있는 작품이 어울려요."
+                    elif mood_label == "웃음/가벼움":
+                        reason = "지금은 가볍게 웃고 리셋하는 게 목적이라, 부담 없이 즐길 수 있는 작품이 어울려요."
+                    else:
+                        reason = "현실을 잠깐 잊게 해주는 세계관이 필요해 보여서, 설정이 강한 작품이 어울려요."
 
-                    with st.spinner("상세 정보를 불러오는 중..."):
-                        details = movie_details_cached(tmdb_key, int(movie_id), language, append) if append else movie_details_cached(tmdb_key, int(movie_id), language, "")
-
-                    # 기본 상세
-                    runtime = details.get("runtime")
-                    tagline = (details.get("tagline") or "").strip()
-                    genres = [g.get("name") for g in (details.get("genres") or []) if g.get("name")]
-                    if genres:
-                        st.caption("장르: " + ", ".join(genres))
-                    if runtime:
-                        st.caption(f"러닝타임: {runtime}분")
-                    if tagline:
-                        st.markdown(f"> {tagline}")
-
-                    # 트레일러
-                    if include_trailer and "videos" in details:
-                        trailer_url = pick_trailer_youtube(details.get("videos"))
-                        if trailer_url:
-                            st.link_button("▶️ 트레일러 보기 (YouTube)", trailer_url)
-                        else:
-                            st.caption("트레일러 링크를 찾지 못했어요.")
-
-                    # 출연진
-                    if include_cast and "credits" in details:
-                        names = top_cast_names(details.get("credits"), n=5)
-                        if names:
-                            st.caption("주요 출연: " + " · ".join(names))
-
-                    # 시청 제공처(JustWatch) — 한국만 표시
-                    if include_providers:
-                        with st.spinner("시청 제공처를 확인 중..."):
-                            prov = movie_watch_providers_cached(tmdb_key, int(movie_id))
-                        providers = providers_in_region(prov, region)
-                        if providers:
-                            st.caption(f"📺 {region} 시청 가능(일부): " + ", ".join(providers))
-                            st.caption("데이터 제공: JustWatch")  # JustWatch Attribution Required :contentReference[oaicite:5]{index=5}
-                        else:
-                            st.caption(f"📺 {region} 시청 제공처 정보가 없어요.")
-
-                    # “추천 이유” (개별)
-                    reason_by_bucket = {
-                        0: "감정선/관계의 여운을 좋아하는 성향이라, 몰입감 있는 서사가 강한 작품을 우선 골랐어요.",
-                        1: "긴장감과 속도감을 선호해서, 전개가 시원하게 뻗는 인기작을 먼저 추천해요.",
-                        2: "세계관/상상력을 즐기는 성향이라, 설정이 강한 작품을 우선으로 가져왔어요.",
-                        3: "기분 전환형 취향이라, 가볍게 보기 좋은 코미디 인기작을 먼저 추천해요.",
-                    }
-                    st.caption(f"💡 이 영화를 추천하는 이유: {reason_by_bucket.get(bucket, '선호 장르 기반 추천이에요.')}")
+                    st.caption(f"💡 추천 이유: {reason}")
 
     st.divider()
-    st.caption(
-        "💡 고도화 포인트: 캐싱으로 반복 호출을 줄이고, "
-        "append_to_response로 상세(트레일러/출연진)를 한 번에 받아 요청 수를 감소시켰어요."
-    )
+    st.caption("※ ‘다시 뽑기’는 체크한 ‘이미 본 영화’를 제외하고 후보를 새로 가져옵니다.")
+else:
+    st.info("왼쪽에 상황을 적고 **‘후보 가져오기’**를 눌러 시작해보세요! 🎬")

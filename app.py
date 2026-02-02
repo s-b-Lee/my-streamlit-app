@@ -1,23 +1,67 @@
 import streamlit as st
-import requests
 
-st.title("🎬 TMDB API 테스트")
+st.set_page_config(page_title="나와 어울리는 영화는?", page_icon="🎬")
 
-# 사이드바에서 API 키 입력
-TMDB_API_KEY = st.sidebar.text_input("TMDB API Key", type="password")
+st.title("🎬 나와 어울리는 영화는?")
+st.write("5개의 질문으로 당신의 영화 취향을 가볍게 알아봐요! 🍿✨")
+st.divider()
 
-if TMDB_API_KEY:
-    if st.button("인기 영화 가져오기"):
-        # TMDB에서 인기 영화 가져오기
-        url = f"https://api.themoviedb.org/3/movie/popular?api_key={TMDB_API_KEY}&language=ko-KR"
-        response = requests.get(url)
-        data = response.json()
-        
-        # 첫 번째 영화 정보 출력
-        movie = data['results'][0]
-        st.write(f"🎬 제목: {movie['title']}")
-        st.write(f"⭐ 평점: {movie['vote_average']}/10")
-        st.write(f"📅 개봉일: {movie['release_date']}")
-        st.write(f"📝 줄거리: {movie['overview'][:100]}...")
-else:
-    st.info("사이드바에 TMDB API Key를 입력해주세요.")
+# 1
+q1 = st.radio(
+    "1️⃣ 시험 끝난 날, 가장 하고 싶은 건?",
+    [
+        "💌 조용한 카페에서 여운 있는 영화 한 편",
+        "💥 친구들이랑 스트레스 풀 겸 통쾌한 액션 영화",
+        "🚀 현실 잊게 만드는 다른 세계관 영화 몰아보기",
+        "😂 아무 생각 없이 웃긴 영화 보면서 쉬기",
+    ],
+)
+
+# 2
+q2 = st.radio(
+    "2️⃣ 영화 주인공으로 살아야 한다면, 어떤 인생이 좋아?",
+    [
+        "🌸 사람들 사이의 감정과 관계가 중심이 되는 삶",
+        "🏃 위험하지만 매 순간이 긴박한 모험의 연속",
+        "🪐 현실엔 없는 능력이나 세계가 존재하는 삶",
+        "🤡 크게 심각하지 않고, 웃지 못할 상황도 웃어넘기는 삶",
+    ],
+)
+
+# 3
+q3 = st.radio(
+    "3️⃣ 친구들이 너한테 자주 하는 말은?",
+    [
+        "🤍 “너랑 얘기하면 생각이 많아져”",
+        "🔥 “너 진짜 추진력 하나는 인정”",
+        "🧠 “너 생각하는 거 좀 독특하다?”",
+        "😆 “너 있으면 분위기 살잖아”",
+    ],
+)
+
+# 4
+q4 = st.radio(
+    "4️⃣ 영화 볼 때 가장 중요한 요소는?",
+    [
+        "🎭 배우의 연기력과 감정선",
+        "🎬 몰입감 있는 전개와 스케일",
+        "🌌 세계관 설정과 상상력",
+        "🎉 얼마나 많이 웃게 해주느냐",
+    ],
+)
+
+# 5
+q5 = st.radio(
+    "5️⃣ 요즘 네 상태를 영화 장면으로 표현한다면?",
+    [
+        "🌧️ 조용히 혼자 걷는 감정적인 장면",
+        "⚡ 바쁘게 움직이며 사건을 해결하는 장면",
+        "🌀 현실과 다른 공간을 떠도는 장면",
+        "🎈 실수 연발이지만 웃음이 터지는 장면",
+    ],
+)
+
+st.divider()
+
+if st.button("✨ 결과 보기"):
+    st.info("🔎 분석 중... (다음 시간에 결과를 보여줄게요!)")
